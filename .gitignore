@@ -1,0 +1,63 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+*.tmp
+
+# =========================
+# Virtual env
+# =========================
+venv/
+.env/
+.venv/
+
+# =========================
+# PyInstaller
+# =========================
+build/*
+!build/LinkCheckerDesktop/
+!build/LinkCheckerDesktop/**
+
+dist/*
+!dist/LinkCheckerDesktop.exe
+
+*.spec
+
+# =========================
+# IDE / Editors
+# =========================
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# =========================
+# OS files
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# User files / data
+# =========================
+*.csv
+*.xlsx
+*.xls
+
+# =========================
+# Logs / temp
+# =========================
+logs/
+*.bak
+
+# =========================
+# Allow important files
+# =========================
+!README.md
+!requirements*.txt
+!*.bat
+!*.py
