@@ -1,19 +1,29 @@
-import threading
+import io
+import os
 import queue
+import threading
 import time
+import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
-from typing import List, Dict, Optional
+from dataclasses import dataclass, asdict
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 import requests
 import tkinter as tk
-import webbrowser
-from tkinter import ttk, filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk
+
+try:
+    from PIL import Image
+    PIL_AVAILABLE = True
+except Exception:
+    Image = None
+    PIL_AVAILABLE = False
 
 APP_TITLE = "Link Checker Pro"
-DEFAULT_TIMEOUT = 5
+DEFAULT_TIMEOUT = 8
 MAX_WORKERS_LIMIT = 50
+MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024
 BG = "#f5f5f7"
 CARD = "#ffffff"
 TEXT = "#111827"
@@ -23,6 +33,7 @@ ACCENT = "#111111"
 ACCENT_SOFT = "#eef2ff"
 SUCCESS = "#0f9d58"
 DANGER = "#d93025"
+WARNING = "#b26a00"
 
 
 @dataclass
@@ -34,14 +45,20 @@ class CheckResult:
     final_url: str
     error: str
     elapsed_sec: float
+    resource_type: str = "unknown"
+    content_type: str = ""
+    content_length: str = ""
+    file_valid: str = ""
+    validation_comment: str = ""
+    bytes_checked: int = 0
 
 
 class LinkCheckerApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title(APP_TITLE)
-        self.root.geometry("1120x780")
-        self.root.minsize(980, 700)
+        self.root.geometry("1260x820")
+        self.root.minsize(1080, 720)
         self.root.configure(bg=BG)
 
         self.df: Optional[pd.DataFrame] = None
@@ -65,12 +82,9 @@ class LinkCheckerApp:
 
         style.configure("App.TFrame", background=BG)
         style.configure("Card.TFrame", background=CARD, relief="flat")
-        style.configure("Card.TLabelframe", background=CARD, borderwidth=1, relief="solid")
-        style.configure("Card.TLabelframe.Label", background=CARD, foreground=TEXT, font=("Segoe UI", 10, "bold"))
         style.configure("App.TLabel", background=BG, foreground=TEXT, font=("Segoe UI", 10))
         style.configure("Muted.TLabel", background=BG, foreground=MUTED, font=("Segoe UI", 9))
         style.configure("Card.TLabel", background=CARD, foreground=TEXT, font=("Segoe UI", 10))
-        style.configure("Status.TLabel", background=BG, foreground=MUTED, font=("Segoe UI", 10))
         style.configure("Primary.TButton", font=("Segoe UI", 10, "bold"), padding=(14, 10), background=ACCENT, foreground="#ffffff")
         style.map("Primary.TButton", background=[("active", "#222222"), ("disabled", "#bbbbbb")], foreground=[("disabled", "#f3f4f6")])
         style.configure("Secondary.TButton", font=("Segoe UI", 10), padding=(12, 10), background="#ffffff", foreground=TEXT, borderwidth=1)
@@ -81,10 +95,11 @@ class LinkCheckerApp:
         style.configure("Treeview", background="#ffffff", fieldbackground="#ffffff", foreground=TEXT, rowheight=28, bordercolor=BORDER, font=("Segoe UI", 9))
         style.configure("Treeview.Heading", background="#f9fafb", foreground=TEXT, relief="flat", font=("Segoe UI", 9, "bold"))
         style.map("Treeview", background=[("selected", "#e5e7eb")], foreground=[("selected", TEXT)])
+        style.configure("Switch.TCheckbutton", background=CARD, foreground=TEXT, font=("Segoe UI", 10))
 
     def _build_ui(self):
         self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(3, weight=1)
+        self.root.rowconfigure(0, weight=1)
 
         outer = ttk.Frame(self.root, style="App.TFrame", padding=18)
         outer.grid(row=0, column=0, sticky="nsew")
@@ -112,31 +127,17 @@ class LinkCheckerApp:
         title = tk.Label(header, text="Link Checker Pro", bg=CARD, fg=TEXT, font=("Segoe UI", 20, "bold"))
         title.grid(row=0, column=1, sticky="sw", pady=(18, 2), padx=(0, 20))
 
-        subtitle = tk.Label(
-            header,
-            text="Проверка ссылок из CSV и Excel с экспортом результата в .xlsx",
-            bg=CARD,
-            fg=MUTED,
-            font=("Segoe UI", 10),
-        )
+        subtitle_text = "Проверка ссылок, изображений и видео из CSV и Excel с экспортом результата в .xlsx"
+        subtitle = tk.Label(header, text=subtitle_text, bg=CARD, fg=MUTED, font=("Segoe UI", 10))
         subtitle.grid(row=1, column=1, sticky="nw", pady=(0, 18), padx=(0, 20))
 
-        chip = tk.Label(
-            header,
-            text="Desktop utility",
-            bg=ACCENT_SOFT,
-            fg=TEXT,
-            font=("Segoe UI", 9, "bold"),
-            padx=10,
-            pady=6,
-        )
+        chip = tk.Label(header, text="Apple-like desktop utility", bg=ACCENT_SOFT, fg=TEXT, font=("Segoe UI", 9, "bold"), padx=10, pady=6)
         chip.grid(row=0, column=2, sticky="ne", padx=20, pady=24)
 
     def _build_file_card(self, parent):
         card = ttk.Frame(parent, style="Card.TFrame", padding=16)
         card.grid(row=1, column=0, sticky="ew", pady=(0, 14))
-        card.columnconfigure(1, weight=1)
-        for c in (0, 1, 2, 3, 4, 5):
+        for c in range(6):
             card.columnconfigure(c, weight=1)
 
         ttk.Label(card, text="Файл", style="Card.TLabel").grid(row=0, column=0, sticky="w")
@@ -157,14 +158,22 @@ class LinkCheckerApp:
         self.workers_var = tk.StringVar(value="20")
         ttk.Entry(card, textvariable=self.workers_var, width=8, style="App.TEntry").grid(row=1, column=5, sticky="w", pady=(14, 0))
 
-        info = tk.Label(
-            card,
-            text="Поддерживаются CSV, XLSX, XLS. Результат сохраняется в Excel с автошириной столбцов.",
-            bg=CARD,
-            fg=MUTED,
-            font=("Segoe UI", 9),
-        )
-        info.grid(row=2, column=0, columnspan=6, sticky="w", pady=(12, 0))
+        options = tk.Frame(card, bg=CARD)
+        options.grid(row=2, column=0, columnspan=6, sticky="ew", pady=(14, 0))
+        options.columnconfigure(0, weight=1)
+        options.columnconfigure(1, weight=1)
+
+        self.deep_check_var = tk.BooleanVar(value=True)
+        self.image_check_var = tk.BooleanVar(value=True)
+        self.video_check_var = tk.BooleanVar(value=True)
+
+        ttk.Checkbutton(options, text="Расширенная проверка файлов", variable=self.deep_check_var, style="Switch.TCheckbutton").grid(row=0, column=0, sticky="w")
+        ttk.Checkbutton(options, text="Проверять изображения на целостность", variable=self.image_check_var, style="Switch.TCheckbutton").grid(row=0, column=1, sticky="w")
+        ttk.Checkbutton(options, text="Проверять видео по сигнатуре", variable=self.video_check_var, style="Switch.TCheckbutton").grid(row=1, column=0, sticky="w", pady=(8, 0))
+
+        pillow_note = "Pillow найден: глубокая проверка изображений включена." if PIL_AVAILABLE else "Pillow не найден: изображения будут проверяться только по отдаче файла."
+        info = tk.Label(card, text=f"Поддерживаются CSV, XLSX, XLS. {pillow_note}", bg=CARD, fg=MUTED, font=("Segoe UI", 9))
+        info.grid(row=3, column=0, columnspan=6, sticky="w", pady=(12, 0))
 
     def _build_actions(self, parent):
         wrap = ttk.Frame(parent, style="App.TFrame")
@@ -174,20 +183,19 @@ class LinkCheckerApp:
         left = ttk.Frame(wrap, style="App.TFrame")
         left.grid(row=0, column=0, sticky="w")
 
-        self.start_btn = ttk.Button(left, text="Проверить ссылки", command=self.start_check, style="Primary.TButton")
+        self.start_btn = ttk.Button(left, text="Проверить", command=self.start_check, style="Primary.TButton")
         self.start_btn.grid(row=0, column=0)
         self.stop_btn = ttk.Button(left, text="Остановить", command=self.request_stop, state="disabled", style="Secondary.TButton")
         self.stop_btn.grid(row=0, column=1, padx=(10, 0))
         self.save_btn = ttk.Button(left, text="Сохранить в Excel", command=self.save_results, state="disabled", style="Secondary.TButton")
         self.save_btn.grid(row=0, column=2, padx=(10, 0))
-        self.open_btn = ttk.Button(left, text="О папке результата", command=self.open_result_folder, style="Secondary.TButton")
+        self.open_btn = ttk.Button(left, text="Путь к результату", command=self.open_result_folder, style="Secondary.TButton")
         self.open_btn.grid(row=0, column=3, padx=(10, 0))
 
         right = tk.Frame(wrap, bg=BG, highlightbackground=BORDER, highlightthickness=1)
         right.grid(row=0, column=1, sticky="e")
         self.status_var = tk.StringVar(value="Загрузите файл и выберите столбец со ссылками.")
-        status = tk.Label(right, textvariable=self.status_var, bg=BG, fg=MUTED, font=("Segoe UI", 10), padx=12, pady=10)
-        status.pack()
+        tk.Label(right, textvariable=self.status_var, bg=BG, fg=MUTED, font=("Segoe UI", 10), padx=12, pady=10).pack()
 
     def _build_results(self, parent):
         card = ttk.Frame(parent, style="Card.TFrame", padding=16)
@@ -207,35 +215,46 @@ class LinkCheckerApp:
 
         stats = tk.Frame(card, bg=CARD)
         stats.grid(row=2, column=0, sticky="ew", pady=(0, 12))
-        for i in range(4):
+        for i in range(5):
             stats.grid_columnconfigure(i, weight=1)
         self.total_var = tk.StringVar(value="Всего: 0")
         self.ok_var = tk.StringVar(value="OK: 0")
         self.bad_var = tk.StringVar(value="Ошибки: 0")
+        self.valid_var = tk.StringVar(value="Файлы OK: 0")
         self.time_var = tk.StringVar(value="Время: 0.0 сек")
         self._stat_chip(stats, self.total_var, 0)
         self._stat_chip(stats, self.ok_var, 1, fg=SUCCESS)
         self._stat_chip(stats, self.bad_var, 2, fg=DANGER)
-        self._stat_chip(stats, self.time_var, 3)
+        self._stat_chip(stats, self.valid_var, 3, fg=WARNING)
+        self._stat_chip(stats, self.time_var, 4)
 
-        columns = ("source_value", "checked_url", "status_code", "ok", "final_url", "error", "elapsed_sec")
+        columns = (
+            "source_value", "status_code", "resource_type", "file_valid", "content_type",
+            "checked_url", "final_url", "validation_comment", "error", "elapsed_sec"
+        )
         self.tree = ttk.Treeview(card, columns=columns, show="headings")
         headers = {
             "source_value": "Исходное значение",
+            "status_code": "HTTP",
+            "resource_type": "Тип",
+            "file_valid": "Файл валиден",
+            "content_type": "Content-Type",
             "checked_url": "Проверенный URL",
-            "status_code": "Статус",
-            "ok": "Доступна",
             "final_url": "Финальный URL",
+            "validation_comment": "Комментарий",
             "error": "Ошибка",
             "elapsed_sec": "Время, сек",
         }
         widths = {
             "source_value": 220,
+            "status_code": 80,
+            "resource_type": 90,
+            "file_valid": 110,
+            "content_type": 140,
             "checked_url": 220,
-            "status_code": 90,
-            "ok": 90,
             "final_url": 220,
-            "error": 240,
+            "validation_comment": 220,
+            "error": 200,
             "elapsed_sec": 90,
         }
         for col in columns:
@@ -253,39 +272,24 @@ class LinkCheckerApp:
         footer = ttk.Frame(parent, style="App.TFrame", padding=(4, 12, 4, 0))
         footer.grid(row=4, column=0, sticky="ew")
         footer.columnconfigure(0, weight=1)
-
         foot_card = tk.Frame(footer, bg=BG)
         foot_card.grid(row=0, column=0, sticky="e")
-        label = tk.Label(
-            foot_card,
-            text="Created by Roman Kostrov  •  rkostrov@yandex.ru",
-            font=("Segoe UI", 9),
-            fg=MUTED,
-            bg=BG,
-            cursor="hand2",
-        )
+        label = tk.Label(foot_card, text="Created by Roman Kostrov  •  rkostrov@yandex.ru", font=("Segoe UI", 9), fg=MUTED, bg=BG, cursor="hand2")
         label.pack(anchor="e")
         label.bind("<Button-1>", lambda event: webbrowser.open("mailto:rkostrov@yandex.ru"))
 
     def _stat_chip(self, parent, variable, column, fg=TEXT):
         chip = tk.Frame(parent, bg="#f9fafb", highlightbackground=BORDER, highlightthickness=1)
         chip.grid(row=0, column=column, sticky="ew", padx=(0 if column == 0 else 8, 0))
-        label = tk.Label(chip, textvariable=variable, bg="#f9fafb", fg=fg, font=("Segoe UI", 10, "bold"), padx=12, pady=8)
-        label.pack(fill="x")
+        tk.Label(chip, textvariable=variable, bg="#f9fafb", fg=fg, font=("Segoe UI", 10, "bold"), padx=12, pady=8).pack(fill="x")
 
     def choose_file(self):
         path = filedialog.askopenfilename(
             title="Выберите CSV или Excel файл",
-            filetypes=[
-                ("Таблицы", "*.csv *.xlsx *.xls"),
-                ("CSV", "*.csv"),
-                ("Excel", "*.xlsx *.xls"),
-                ("Все файлы", "*.*"),
-            ],
+            filetypes=[("Таблицы", "*.csv *.xlsx *.xls"), ("CSV", "*.csv"), ("Excel", "*.xlsx *.xls"), ("Все файлы", "*.*")],
         )
         if not path:
             return
-
         try:
             self.df = self._read_table(path)
             self.file_path = path
@@ -358,27 +362,34 @@ class LinkCheckerApp:
         self.total_var.set(f"Всего: {len(rows)}")
         self.ok_var.set("OK: 0")
         self.bad_var.set("Ошибки: 0")
+        self.valid_var.set("Файлы OK: 0")
         self.time_var.set("Время: 0.0 сек")
-        self.status_var.set("Идёт проверка ссылок...")
+        self.status_var.set("Идёт проверка ссылок и файлов...")
 
-        self.worker_thread = threading.Thread(target=self._run_check, args=(rows, timeout, workers), daemon=True)
+        options = {
+            "deep_check": self.deep_check_var.get(),
+            "check_images": self.image_check_var.get(),
+            "check_videos": self.video_check_var.get(),
+        }
+        self.worker_thread = threading.Thread(target=self._run_check, args=(rows, timeout, workers, options), daemon=True)
         self.worker_thread.start()
 
     def request_stop(self):
         self.stop_requested = True
         self.status_var.set("Остановка после завершения текущих запросов...")
 
-    def _run_check(self, rows: List, timeout: int, workers: int):
+    def _run_check(self, rows: List[Tuple[int, str]], timeout: int, workers: int, options: Dict[str, bool]):
         start = time.time()
         total = len(rows)
         completed = 0
         ok_count = 0
         bad_count = 0
+        valid_count = 0
         indexed_results: Dict[int, CheckResult] = {}
 
         try:
             with ThreadPoolExecutor(max_workers=min(workers, total)) as executor:
-                futures = {executor.submit(check_url, value, timeout): (idx, value) for idx, value in rows}
+                futures = {executor.submit(check_url_advanced, value, timeout, options): (idx, value) for idx, value in rows}
                 for future in as_completed(futures):
                     idx, original_value = futures[future]
                     if self.stop_requested:
@@ -388,33 +399,43 @@ class LinkCheckerApp:
                     try:
                         result = future.result()
                     except Exception as e:
-                        result = CheckResult(original_value, original_value, "ERROR", False, "", str(e), 0.0)
+                        result = CheckResult(original_value, normalize_url(original_value), "ERROR", False, "", str(e), 0.0)
 
                     indexed_results[idx] = result
                     completed += 1
-                    if result.ok:
-                        ok_count += 1
-                    else:
-                        bad_count += 1
+                    ok_count += 1 if result.ok else 0
+                    bad_count += 0 if result.ok else 1
+                    valid_count += 1 if result.file_valid == "YES" else 0
                     self.progress_queue.put({
                         "type": "progress",
                         "completed": completed,
                         "total": total,
                         "ok": ok_count,
                         "bad": bad_count,
+                        "valid": valid_count,
                         "elapsed": time.time() - start,
                         "row": result,
                     })
 
             export_rows = []
-            for idx, result in indexed_results.items():
-                source_row = self.df.loc[idx].to_dict() if self.df is not None and idx in self.df.index else {}
+            for idx in rows:
+                row_index = idx[0]
+                result = indexed_results.get(row_index)
+                if not result:
+                    continue
+                source_row = self.df.loc[row_index].to_dict() if self.df is not None and row_index in self.df.index else {}
                 source_row.update({
                     "Исходное значение": result.source_value,
                     "Проверенный URL": result.checked_url,
                     "HTTP статус": result.status_code,
                     "Доступна": "ДА" if result.ok else "НЕТ",
                     "Финальный URL": result.final_url,
+                    "Тип ресурса": result.resource_type,
+                    "Content-Type": result.content_type,
+                    "Размер по заголовку": result.content_length,
+                    "Проверено байт": result.bytes_checked,
+                    "Файл валиден": result.file_valid,
+                    "Комментарий проверки": result.validation_comment,
                     "Ошибка": result.error,
                     "Время ответа, сек": round(result.elapsed_sec, 3),
                 })
@@ -430,6 +451,7 @@ class LinkCheckerApp:
                 "total": total,
                 "ok": ok_count,
                 "bad": bad_count,
+                "valid": valid_count,
                 "elapsed": time.time() - start,
             })
             return
@@ -440,6 +462,7 @@ class LinkCheckerApp:
             "total": total,
             "ok": ok_count,
             "bad": bad_count,
+            "valid": valid_count,
             "elapsed": time.time() - start,
             "stopped": self.stop_requested,
         })
@@ -453,9 +476,21 @@ class LinkCheckerApp:
                     self.progress_label.set(f"Прогресс: {item['completed']} / {item['total']}")
                     self.ok_var.set(f"OK: {item['ok']}")
                     self.bad_var.set(f"Ошибки: {item['bad']}")
+                    self.valid_var.set(f"Файлы OK: {item['valid']}")
                     self.time_var.set(f"Время: {item['elapsed']:.1f} сек")
                     row: CheckResult = item["row"]
-                    self.tree.insert("", 0, values=(row.source_value, row.checked_url, row.status_code, "ДА" if row.ok else "НЕТ", row.final_url, row.error, f"{row.elapsed_sec:.2f}"))
+                    self.tree.insert("", 0, values=(
+                        row.source_value,
+                        row.status_code,
+                        row.resource_type,
+                        row.file_valid,
+                        row.content_type,
+                        row.checked_url,
+                        row.final_url,
+                        row.validation_comment,
+                        row.error,
+                        f"{row.elapsed_sec:.2f}",
+                    ))
                 elif item["type"] == "done":
                     self.start_btn.config(state="normal")
                     self.stop_btn.config(state="disabled")
@@ -470,6 +505,7 @@ class LinkCheckerApp:
                     self.progress_label.set(f"Прогресс: {item['completed']} / {item['total']}")
                     self.ok_var.set(f"OK: {item['ok']}")
                     self.bad_var.set(f"Ошибки: {item['bad']}")
+                    self.valid_var.set(f"Файлы OK: {item['valid']}")
                     self.time_var.set(f"Время: {item['elapsed']:.1f} сек")
                 elif item["type"] == "fatal_error":
                     self.start_btn.config(state="normal")
@@ -479,6 +515,7 @@ class LinkCheckerApp:
                     self.progress_label.set(f"Прогресс: {item['completed']} / {item['total']}")
                     self.ok_var.set(f"OK: {item['ok']}")
                     self.bad_var.set(f"Ошибки: {item['bad']}")
+                    self.valid_var.set(f"Файлы OK: {item['valid']}")
                     self.time_var.set(f"Время: {item['elapsed']:.1f} сек")
                     self.status_var.set("Проверка завершилась с ошибкой на этапе подготовки результата.")
                     messagebox.showerror("Ошибка", item["message"])
@@ -509,7 +546,7 @@ class LinkCheckerApp:
                     for cell in column_cells:
                         value = "" if cell.value is None else str(cell.value)
                         max_len = max(max_len, len(value))
-                    ws.column_dimensions[col_letter].width = min(max_len + 2, 60)
+                    ws.column_dimensions[col_letter].width = min(max_len + 2, 65)
             self.last_saved_path = path
             self.status_var.set(f"Результат сохранён: {path}")
             messagebox.showinfo("Готово", f"Файл сохранён:\n{path}")
@@ -536,10 +573,73 @@ def normalize_url(url: str) -> str:
     return url_clean
 
 
-def check_url(url: str, timeout: int = DEFAULT_TIMEOUT) -> CheckResult:
+def classify_content_type(content_type: str) -> str:
+    if not content_type:
+        return "unknown"
+    ct = content_type.lower()
+    if ct.startswith("image/"):
+        return "image"
+    if ct.startswith("video/"):
+        return "video"
+    if ct.startswith("audio/"):
+        return "audio"
+    if ct == "application/pdf":
+        return "document"
+    if "html" in ct or "xhtml" in ct:
+        return "page"
+    return "file"
+
+
+def validate_image_content(content: bytes) -> Tuple[bool, str]:
+    if not content:
+        return False, "Пустой файл изображения"
+    if not PIL_AVAILABLE:
+        return True, "Pillow не установлен, проверена только отдача файла"
+    try:
+        with Image.open(io.BytesIO(content)) as img:
+            img.verify()
+            fmt = getattr(img, "format", "image")
+        return True, f"Изображение валидно ({fmt})"
+    except Exception as e:
+        return False, f"Битое изображение: {str(e)[:120]}"
+
+
+def validate_video_content(content: bytes, content_type: str) -> Tuple[bool, str]:
+    if not content:
+        return False, "Видео не удалось загрузить"
+    header = content[:64]
+    if b"ftyp" in header:
+        return True, "Похоже на валидный MP4/MOV"
+    if header.startswith(b"\x1A\x45\xDF\xA3"):
+        return True, "Похоже на валидный WebM/MKV"
+    if header.startswith(b"RIFF"):
+        return True, "Похоже на валидный AVI"
+    if content_type.lower().startswith("video/"):
+        return True, "Видео отдается, сигнатура нестандартная"
+    return False, "Файл не похож на корректное видео"
+
+
+def read_limited_content(response: requests.Response, max_bytes: int = MAX_DOWNLOAD_BYTES) -> Tuple[bytes, int]:
+    content = b""
+    downloaded = 0
+    for chunk in response.iter_content(chunk_size=65536):
+        if not chunk:
+            continue
+        remaining = max_bytes - downloaded
+        if remaining <= 0:
+            break
+        take = chunk[:remaining]
+        content += take
+        downloaded += len(take)
+        if downloaded >= max_bytes:
+            break
+    return content, downloaded
+
+
+def check_url_advanced(url: str, timeout: int, options: Dict[str, bool]) -> CheckResult:
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept": "*/*",
         "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
         "Connection": "keep-alive",
     }
@@ -552,8 +652,74 @@ def check_url(url: str, timeout: int = DEFAULT_TIMEOUT) -> CheckResult:
             status_code = str(response.status_code)
             final_url = response.url or ""
             ok = response.status_code == 200
+            content_type = (response.headers.get("Content-Type") or "").split(";")[0].strip()
+            content_length = (response.headers.get("Content-Length") or "").strip()
+            resource_type = classify_content_type(content_type)
+
+            result = CheckResult(
+                source_value=str(url),
+                checked_url=prepared_url,
+                status_code=status_code,
+                ok=ok,
+                final_url=final_url,
+                error="",
+                elapsed_sec=0.0,
+                resource_type=resource_type,
+                content_type=content_type,
+                content_length=content_length,
+                file_valid="",
+                validation_comment="",
+                bytes_checked=0,
+            )
+
+            if not ok:
+                result.elapsed_sec = time.time() - started
+                response.close()
+                return result
+
+            deep_check = options.get("deep_check", True)
+            check_images = options.get("check_images", True)
+            check_videos = options.get("check_videos", True)
+
+            if not deep_check:
+                result.file_valid = "N/A"
+                result.validation_comment = "Выполнена только проверка доступности ссылки"
+                result.elapsed_sec = time.time() - started
+                response.close()
+                return result
+
+            if resource_type == "page":
+                result.file_valid = "N/A"
+                result.validation_comment = "HTML-страница доступна"
+                result.elapsed_sec = time.time() - started
+                response.close()
+                return result
+
+            content, downloaded = read_limited_content(response)
+            result.bytes_checked = downloaded
+
+            if resource_type == "image":
+                if check_images:
+                    valid, comment = validate_image_content(content)
+                else:
+                    valid, comment = (downloaded > 0, f"Изображение отдается, прочитано {downloaded} байт")
+                result.file_valid = "YES" if valid else "NO"
+                result.validation_comment = comment
+            elif resource_type == "video":
+                if check_videos:
+                    valid, comment = validate_video_content(content, content_type)
+                else:
+                    valid, comment = (downloaded > 0, f"Видео отдается, прочитано {downloaded} байт")
+                result.file_valid = "YES" if valid else "NO"
+                result.validation_comment = comment
+            else:
+                valid = downloaded > 0
+                result.file_valid = "YES" if valid else "NO"
+                result.validation_comment = f"Файл доступен, прочитано {downloaded} байт" if valid else "Файл пустой или недоступен для чтения"
+
+            result.elapsed_sec = time.time() - started
             response.close()
-        return CheckResult(str(url), prepared_url, status_code, ok, final_url, "", time.time() - started)
+            return result
     except requests.exceptions.Timeout:
         return CheckResult(str(url), prepared_url, "TIMEOUT", False, "", "Таймаут соединения", time.time() - started)
     except requests.exceptions.ConnectionError:
