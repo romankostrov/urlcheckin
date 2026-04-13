@@ -1,4 +1,4 @@
-('C:\\Users\\kostrov\\Desktop\\link_checker_desktop_with_exe_build_fixed\\build\\LinkCheckerDesktop\\PYZ-00.pyz',
+('C:\\GIT\\urlcheckin\\build\\LinkCheckerDesktop\\PYZ-00.pyz',
  [('PIL',
    'C:\\Users\\kostrov\\AppData\\Local\\Python\\pythoncore-3.14-64\\Lib\\site-packages\\PIL\\__init__.py',
    'PYMODULE'),
