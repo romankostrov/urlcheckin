@@ -261,83 +261,108 @@ class LinkCheckerApp:
         bad_count = 0
         indexed_results: Dict[int, CheckResult] = {}
 
-        with ThreadPoolExecutor(max_workers=min(workers, total)) as executor:
-            futures = {
-                executor.submit(check_url, value, timeout): (idx, value)
-                for idx, value in rows
-            }
-            for future in as_completed(futures):
-                idx, original_value = futures[future]
-                if self.stop_requested:
-                    for f in futures:
-                        f.cancel()
-                    break
-                try:
-                    result = future.result()
-                except Exception as e:
-                    result = CheckResult(
-                        source_value=original_value,
-                        checked_url=original_value,
-                        status_code="ERROR",
-                        ok=False,
-                        final_url="",
-                        error=str(e),
-                        elapsed_sec=0.0,
+        try:
+            with ThreadPoolExecutor(max_workers=min(workers, total)) as executor:
+                futures = {
+                    executor.submit(check_url, value, timeout): (idx, value)
+                    for idx, value in rows
+                }
+                for future in as_completed(futures):
+                    idx, original_value = futures[future]
+                    if self.stop_requested:
+                        for f in futures:
+                            f.cancel()
+                        break
+                    try:
+                        result = future.result()
+                    except Exception as e:
+                        result = CheckResult(
+                            source_value=original_value,
+                            checked_url=original_value,
+                            status_code="ERROR",
+                            ok=False,
+                            final_url="",
+                            error=str(e),
+                            elapsed_sec=0.0,
+                        )
+
+                    indexed_results[idx] = result
+                    completed += 1
+                    if result.ok:
+                        ok_count += 1
+                    else:
+                        bad_count += 1
+                    self.progress_queue.put(
+                        {
+                            "type": "progress",
+                            "completed": completed,
+                            "total": total,
+                            "ok": ok_count,
+                            "bad": bad_count,
+                            "elapsed": time.time() - start,
+                            "row": result,
+                        }
                     )
 
-                indexed_results[idx] = result
-                completed += 1
-                if result.ok:
-                    ok_count += 1
-                else:
-                    bad_count += 1
-                self.progress_queue.put(
-                    {
-                        "type": "progress",
-                        "completed": completed,
-                        "total": total,
-                        "ok": ok_count,
-                        "bad": bad_count,
-                        "elapsed": time.time() - start,
-                        "row": result,
-                    }
+            if indexed_results:
+                ordered_items = sorted(indexed_results.items(), key=lambda x: x[0])
+                self.results_df = pd.DataFrame(
+                    [
+                        {
+                            "№ строки": idx + 1,
+                            "Исходное значение": result.source_value,
+                            "Проверенный URL": result.checked_url,
+                            "HTTP статус": result.status_code,
+                            "Доступна": "ДА" if result.ok else "НЕТ",
+                            "Финальный URL": result.final_url,
+                            "Ошибка": result.error,
+                            "Время ответа, сек": round(result.elapsed_sec, 3),
+                        }
+                        for idx, result in ordered_items
+                    ]
                 )
+            else:
+                self.results_df = pd.DataFrame()
 
-        export_df = self.df.copy()
-        export_df["Исходное значение"] = ""
-        export_df["Проверенный URL"] = ""
-        export_df["HTTP статус"] = ""
-        export_df["Доступна"] = ""
-        export_df["Финальный URL"] = ""
-        export_df["Ошибка"] = ""
-        export_df["Время ответа, сек"] = ""
-
-        for idx, result in indexed_results.items():
-            export_df.at[idx, "Исходное значение"] = result.source_value
-            export_df.at[idx, "Проверенный URL"] = result.checked_url
-            export_df.at[idx, "HTTP статус"] = result.status_code
-            export_df.at[idx, "Доступна"] = "ДА" if result.ok else "НЕТ"
-            export_df.at[idx, "Финальный URL"] = result.final_url
-            export_df.at[idx, "Ошибка"] = result.error
-            export_df.at[idx, "Время ответа, сек"] = round(result.elapsed_sec, 3)
-
-        if indexed_results:
-            checked_only = export_df.loc[list(indexed_results.keys())].copy()
-            self.results_df = checked_only
-        else:
-            self.results_df = None
-
-        self.progress_queue.put(
-            {
-                "type": "done",
-                "completed": completed,
-                "total": total,
-                "ok": ok_count,
-                "bad": bad_count,
-                "elapsed": time.time() - start,
-                "stopped": self.stop_requested,
-            }
-        )
+            self.progress_queue.put(
+                {
+                    "type": "done",
+                    "completed": completed,
+                    "total": total,
+                    "ok": ok_count,
+                    "bad": bad_count,
+                    "elapsed": time.time() - start,
+                    "stopped": self.stop_requested,
+                }
+            )
+        except Exception as e:
+            self.results_df = pd.DataFrame(
+                [
+                    {
+                        "№ строки": idx + 1,
+                        "Исходное значение": result.source_value,
+                        "Проверенный URL": result.checked_url,
+                        "HTTP статус": result.status_code,
+                        "Доступна": "ДА" if result.ok else "НЕТ",
+                        "Финальный URL": result.final_url,
+                        "Ошибка": result.error,
+                        "Время ответа, сек": round(result.elapsed_sec, 3),
+                    }
+                    for idx, result in sorted(indexed_results.items(), key=lambda x: x[0])
+                ]
+            )
+            self.progress_queue.put(
+                {
+                    "type": "done",
+                    "completed": completed,
+                    "total": total,
+                    "ok": ok_count,
+                    "bad": bad_count,
+                    "elapsed": time.time() - start,
+                    "stopped": True,
+                    "error": str(e),
+                }
+            )
 
     def _poll_queue(self):
         try:
@@ -366,10 +391,15 @@ class LinkCheckerApp:
                 elif item["type"] == "done":
                     self.start_btn.config(state="normal")
                     self.stop_btn.config(state="disabled")
-                    if self.results_df is not None and len(self.results_df) > 0:
+                    if self.results_df is not None and not self.results_df.empty:
                         self.save_btn.config(state="normal")
-                    stopped_text = "Проверка остановлена." if item["stopped"] else "Проверка завершена." 
-                    self.status_var.set(stopped_text)
+                    else:
+                        self.save_btn.config(state="disabled")
+                    if item.get("error"):
+                        self.status_var.set(f"Проверка завершилась с ошибкой подготовки результата: {item['error']}")
+                    else:
+                        stopped_text = "Проверка остановлена." if item["stopped"] else "Проверка завершена. Можно сохранять в Excel."
+                        self.status_var.set(stopped_text)
                     self.progress["value"] = item["completed"]
                     self.progress_label.set(f"Прогресс: {item['completed']} / {item['total']}")
                     self.ok_var.set(f"OK: {item['ok']}")
