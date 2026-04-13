@@ -1,11 +1,11 @@
+
 import io
-import os
 import queue
 import threading
 import time
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -24,7 +24,8 @@ APP_TITLE = "Link Checker Pro"
 DEFAULT_TIMEOUT = 8
 MAX_WORKERS_LIMIT = 50
 MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024
-BG = "#f5f5f7"
+
+BG = "#f3f4f6"
 CARD = "#ffffff"
 TEXT = "#111827"
 MUTED = "#6b7280"
@@ -34,6 +35,8 @@ ACCENT_SOFT = "#eef2ff"
 SUCCESS = "#0f9d58"
 DANGER = "#d93025"
 WARNING = "#b26a00"
+GLASS = "#fafafa"
+SHADOW = "#e9eaee"
 
 
 @dataclass
@@ -53,12 +56,136 @@ class CheckResult:
     bytes_checked: int = 0
 
 
+def rounded_rect(canvas, x1, y1, x2, y2, r=16, **kwargs):
+    points = [
+        x1 + r, y1,
+        x2 - r, y1,
+        x2, y1,
+        x2, y1 + r,
+        x2, y2 - r,
+        x2, y2,
+        x2 - r, y2,
+        x1 + r, y2,
+        x1, y2,
+        x1, y2 - r,
+        x1, y1 + r,
+        x1, y1,
+    ]
+    return canvas.create_polygon(points, smooth=True, splinesteps=36, **kwargs)
+
+
+class SoftButton(tk.Canvas):
+    def __init__(self, parent, text, command=None, width=170, height=42, kind="secondary", **kwargs):
+        super().__init__(parent, width=width, height=height, bg=parent.cget("bg"), highlightthickness=0, bd=0, **kwargs)
+        self.command = command
+        self.kind = kind
+        self.enabled = True
+        self.width = width
+        self.height = height
+
+        self.colors = {
+            "primary": {"fill": "#111111", "text": "#ffffff", "shadow": "#d7d9df", "border": "#111111", "active": "#1f2937"},
+            "secondary": {"fill": "#ffffff", "text": TEXT, "shadow": "#e3e5ea", "border": "#e5e7eb", "active": "#f3f4f6"},
+        }
+        self._draw()
+        self.bind("<Button-1>", self._on_click)
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
+
+    def _draw(self, active=False):
+        self.delete("all")
+        palette = self.colors["primary" if self.kind == "primary" else "secondary"]
+        fill = palette["active"] if active and self.enabled else palette["fill"]
+        text_color = palette["text"] if self.enabled else "#9ca3af"
+        border = palette["border"] if self.enabled else "#d1d5db"
+        shadow = palette["shadow"]
+
+        rounded_rect(self, 8, 8, self.width - 2, self.height - 2, r=18, fill=shadow, outline=shadow)
+        rounded_rect(self, 2, 2, self.width - 8, self.height - 8, r=18, fill=fill, outline=border)
+        self.create_text(self.width / 2 - 3, self.height / 2 - 3, text=self._get_text(), fill=text_color,
+                         font=("Segoe UI", 10, "bold" if self.kind == "primary" else "normal"))
+
+    def _get_text(self):
+        return getattr(self, "_text", "") or ""
+
+    def set_text(self, value):
+        self._text = value
+        self._draw()
+
+    def _on_click(self, event):
+        if self.enabled and self.command:
+            self.command()
+
+    def _on_enter(self, event):
+        if self.enabled:
+            self.config(cursor="hand2")
+            self._draw(active=True)
+
+    def _on_leave(self, event):
+        self._draw(active=False)
+
+    def set_state(self, state: str):
+        self.enabled = state != "disabled"
+        self._draw()
+
+    def configure(self, cnf=None, **kwargs):
+        if "text" in kwargs:
+            self._text = kwargs.pop("text")
+        if "command" in kwargs:
+            self.command = kwargs.pop("command")
+        super().configure(cnf or {}, **kwargs)
+        self._draw()
+
+    config = configure
+
+
+class Switch(tk.Canvas):
+    def __init__(self, parent, text, variable: tk.BooleanVar, width=360, command=None, **kwargs):
+        super().__init__(parent, width=width, height=34, bg=parent.cget("bg"), highlightthickness=0, bd=0, **kwargs)
+        self.variable = variable
+        self.text = text
+        self.command = command
+        self.enabled = True
+        self.width = width
+        self.bind("<Button-1>", self.toggle)
+        self.bind("<Enter>", lambda e: self.config(cursor="hand2"))
+        self.variable.trace_add("write", lambda *args: self._draw())
+        self._draw()
+
+    def toggle(self, event=None):
+        if not self.enabled:
+            return
+        self.variable.set(not self.variable.get())
+        if self.command:
+            self.command()
+
+    def set_state(self, state: str):
+        self.enabled = state != "disabled"
+        self._draw()
+
+    def _draw(self):
+        self.delete("all")
+        on = bool(self.variable.get())
+        bg = "#dbeafe" if on and self.enabled else "#eceff3"
+        border = "#bfdbfe" if on and self.enabled else "#dde2e8"
+        knob_shadow = "#cdd6e1"
+        knob = "#111111" if on and self.enabled else "#ffffff"
+        text_color = TEXT if self.enabled else "#9ca3af"
+
+        self.create_text(0, 17, text=self.text, anchor="w", fill=text_color, font=("Segoe UI", 10))
+        x = self.width - 62
+        rounded_rect(self, x, 4, x + 54, 30, r=14, fill=bg, outline=border)
+        knob_x = x + 31 if on else x + 7
+        self.create_oval(knob_x + 1, 8, knob_x + 17, 24, fill=knob_shadow, outline=knob_shadow)
+        self.create_oval(knob_x, 7, knob_x + 16, 23, fill=knob, outline=knob)
+
+
 class LinkCheckerApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title(APP_TITLE)
-        self.root.geometry("1260x820")
-        self.root.minsize(1080, 720)
+        self.root.geometry("1260x860")
+        self.root.minsize(1100, 760)
         self.root.configure(bg=BG)
 
         self.df: Optional[pd.DataFrame] = None
@@ -85,17 +212,28 @@ class LinkCheckerApp:
         style.configure("App.TLabel", background=BG, foreground=TEXT, font=("Segoe UI", 10))
         style.configure("Muted.TLabel", background=BG, foreground=MUTED, font=("Segoe UI", 9))
         style.configure("Card.TLabel", background=CARD, foreground=TEXT, font=("Segoe UI", 10))
-        style.configure("Primary.TButton", font=("Segoe UI", 10, "bold"), padding=(14, 10), background=ACCENT, foreground="#ffffff")
-        style.map("Primary.TButton", background=[("active", "#222222"), ("disabled", "#bbbbbb")], foreground=[("disabled", "#f3f4f6")])
-        style.configure("Secondary.TButton", font=("Segoe UI", 10), padding=(12, 10), background="#ffffff", foreground=TEXT, borderwidth=1)
-        style.map("Secondary.TButton", background=[("active", "#f3f4f6")])
-        style.configure("App.TEntry", fieldbackground="#ffffff", bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER, padding=8)
-        style.configure("App.TCombobox", fieldbackground="#ffffff", bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER, padding=6)
-        style.configure("Horizontal.TProgressbar", troughcolor="#e5e7eb", bordercolor="#e5e7eb", background=ACCENT, lightcolor=ACCENT, darkcolor=ACCENT, thickness=10)
-        style.configure("Treeview", background="#ffffff", fieldbackground="#ffffff", foreground=TEXT, rowheight=28, bordercolor=BORDER, font=("Segoe UI", 9))
-        style.configure("Treeview.Heading", background="#f9fafb", foreground=TEXT, relief="flat", font=("Segoe UI", 9, "bold"))
-        style.map("Treeview", background=[("selected", "#e5e7eb")], foreground=[("selected", TEXT)])
-        style.configure("Switch.TCheckbutton", background=CARD, foreground=TEXT, font=("Segoe UI", 10))
+        style.configure("App.TEntry", fieldbackground="#ffffff", bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER, padding=9)
+        style.configure("App.TCombobox", fieldbackground="#ffffff", bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER, padding=7)
+        style.configure("Horizontal.TProgressbar", troughcolor="#ebeef3", bordercolor="#ebeef3",
+                        background="#111111", lightcolor="#111111", darkcolor="#111111", thickness=12)
+        style.configure("Treeview", background="#ffffff", fieldbackground="#ffffff", foreground=TEXT,
+                        rowheight=30, bordercolor=BORDER, font=("Segoe UI", 9))
+        style.configure("Treeview.Heading", background="#f9fafb", foreground=TEXT, relief="flat",
+                        font=("Segoe UI", 9, "bold"))
+        style.map("Treeview", background=[("selected", "#eef2f7")], foreground=[("selected", TEXT)])
+
+    def _card(self, parent, row, pady=(0, 14), padding=16, sticky="ew"):
+        shell = tk.Frame(parent, bg=BG)
+        shell.grid(row=row, column=0, sticky=sticky, pady=pady)
+        shell.grid_columnconfigure(0, weight=1)
+        tk.Frame(shell, bg=SHADOW, height=2).grid(row=0, column=0, sticky="ew", padx=4, pady=(4, 0))
+        card = tk.Frame(shell, bg=CARD, highlightbackground="#edf0f4", highlightthickness=1)
+        card.grid(row=1, column=0, sticky=sticky)
+        if padding:
+            inner = tk.Frame(card, bg=CARD, padx=padding, pady=padding)
+            inner.pack(fill="both", expand=True)
+            return inner
+        return card
 
     def _build_ui(self):
         self.root.columnconfigure(0, weight=1)
@@ -113,53 +251,63 @@ class LinkCheckerApp:
         self._build_footer(outer)
 
     def _build_header(self, parent):
-        header = tk.Frame(parent, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
-        header.grid(row=0, column=0, sticky="ew", pady=(0, 14))
+        header = self._card(parent, 0, pady=(0, 14), padding=0)
         header.grid_columnconfigure(1, weight=1)
 
-        logo_wrap = tk.Frame(header, bg=CARD)
-        logo_wrap.grid(row=0, column=0, rowspan=2, sticky="nw", padx=20, pady=18)
-        logo = tk.Canvas(logo_wrap, width=72, height=72, bg=CARD, highlightthickness=0)
-        logo.create_oval(4, 4, 68, 68, fill="#111111", outline="#111111")
-        logo.create_text(36, 36, text="RK", fill="white", font=("Segoe UI", 20, "bold"))
+        top = tk.Frame(header, bg=CARD, padx=22, pady=18)
+        top.pack(fill="both", expand=True)
+
+        logo_wrap = tk.Frame(top, bg=CARD)
+        logo_wrap.grid(row=0, column=0, rowspan=2, sticky="nw", padx=(0, 18))
+        logo = tk.Canvas(logo_wrap, width=76, height=76, bg=CARD, highlightthickness=0)
+        logo.create_oval(4, 5, 72, 73, fill="#dfe7ff", outline="#dfe7ff")
+        logo.create_oval(10, 11, 66, 67, fill="#111111", outline="#111111")
+        logo.create_text(38, 39, text="RK", fill="white", font=("Segoe UI", 20, "bold"))
         logo.pack()
 
-        title = tk.Label(header, text="Link Checker Pro", bg=CARD, fg=TEXT, font=("Segoe UI", 20, "bold"))
-        title.grid(row=0, column=1, sticky="sw", pady=(18, 2), padx=(0, 20))
+        title = tk.Label(top, text="Link Checker Pro", bg=CARD, fg=TEXT, font=("Segoe UI", 22, "bold"))
+        title.grid(row=0, column=1, sticky="sw", pady=(4, 2))
 
-        subtitle_text = "Проверка ссылок, изображений и видео из CSV и Excel с экспортом результата в .xlsx"
-        subtitle = tk.Label(header, text=subtitle_text, bg=CARD, fg=MUTED, font=("Segoe UI", 10))
-        subtitle.grid(row=1, column=1, sticky="nw", pady=(0, 18), padx=(0, 20))
+        subtitle = tk.Label(
+            top,
+            text="Проверка ссылок, изображений и видео из CSV и Excel с экспортом результата в .xlsx",
+            bg=CARD,
+            fg=MUTED,
+            font=("Segoe UI", 10),
+        )
+        subtitle.grid(row=1, column=1, sticky="nw")
 
-        chip = tk.Label(header, text="Apple-like desktop utility", bg=ACCENT_SOFT, fg=TEXT, font=("Segoe UI", 9, "bold"), padx=10, pady=6)
-        chip.grid(row=0, column=2, sticky="ne", padx=20, pady=24)
+        chip = tk.Label(top, text="Apple-like desktop utility", bg="#f5f7fb", fg=TEXT,
+                        font=("Segoe UI", 9, "bold"), padx=12, pady=7)
+        chip.grid(row=0, column=2, sticky="ne", padx=(18, 0), pady=(4, 0))
 
     def _build_file_card(self, parent):
-        card = ttk.Frame(parent, style="Card.TFrame", padding=16)
-        card.grid(row=1, column=0, sticky="ew", pady=(0, 14))
+        card = self._card(parent, 1, pady=(0, 14))
         for c in range(6):
-            card.columnconfigure(c, weight=1)
+            card.grid_columnconfigure(c, weight=1)
 
-        ttk.Label(card, text="Файл", style="Card.TLabel").grid(row=0, column=0, sticky="w")
+        tk.Label(card, text="Файл", bg=CARD, fg=TEXT, font=("Segoe UI", 10)).grid(row=0, column=0, sticky="w")
         self.file_var = tk.StringVar()
         ttk.Entry(card, textvariable=self.file_var, style="App.TEntry").grid(row=0, column=1, columnspan=4, sticky="ew", padx=(8, 10))
-        ttk.Button(card, text="Выбрать файл", command=self.choose_file, style="Secondary.TButton").grid(row=0, column=5, sticky="e")
+        self.choose_btn = SoftButton(card, text="Выбрать файл", command=self.choose_file, width=150, kind="secondary")
+        self.choose_btn.grid(row=0, column=5, sticky="e")
+        self.choose_btn.set_text("Выбрать файл")
 
-        ttk.Label(card, text="Столбец со ссылками", style="Card.TLabel").grid(row=1, column=0, sticky="w", pady=(14, 0))
+        tk.Label(card, text="Столбец со ссылками", bg=CARD, fg=TEXT, font=("Segoe UI", 10)).grid(row=1, column=0, sticky="w", pady=(14, 0))
         self.column_var = tk.StringVar()
         self.column_combo = ttk.Combobox(card, textvariable=self.column_var, state="readonly", style="App.TCombobox")
         self.column_combo.grid(row=1, column=1, sticky="ew", padx=(8, 16), pady=(14, 0))
 
-        ttk.Label(card, text="Таймаут, сек", style="Card.TLabel").grid(row=1, column=2, sticky="w", pady=(14, 0))
+        tk.Label(card, text="Таймаут, сек", bg=CARD, fg=TEXT, font=("Segoe UI", 10)).grid(row=1, column=2, sticky="w", pady=(14, 0))
         self.timeout_var = tk.StringVar(value=str(DEFAULT_TIMEOUT))
         ttk.Entry(card, textvariable=self.timeout_var, width=8, style="App.TEntry").grid(row=1, column=3, sticky="w", padx=(8, 16), pady=(14, 0))
 
-        ttk.Label(card, text="Потоки", style="Card.TLabel").grid(row=1, column=4, sticky="w", pady=(14, 0))
+        tk.Label(card, text="Потоки", bg=CARD, fg=TEXT, font=("Segoe UI", 10)).grid(row=1, column=4, sticky="w", pady=(14, 0))
         self.workers_var = tk.StringVar(value="20")
         ttk.Entry(card, textvariable=self.workers_var, width=8, style="App.TEntry").grid(row=1, column=5, sticky="w", pady=(14, 0))
 
         options = tk.Frame(card, bg=CARD)
-        options.grid(row=2, column=0, columnspan=6, sticky="ew", pady=(14, 0))
+        options.grid(row=2, column=0, columnspan=6, sticky="ew", pady=(18, 0))
         options.columnconfigure(0, weight=1)
         options.columnconfigure(1, weight=1)
 
@@ -167,51 +315,64 @@ class LinkCheckerApp:
         self.image_check_var = tk.BooleanVar(value=True)
         self.video_check_var = tk.BooleanVar(value=True)
 
-        ttk.Checkbutton(options, text="Расширенная проверка файлов", variable=self.deep_check_var, style="Switch.TCheckbutton").grid(row=0, column=0, sticky="w")
-        ttk.Checkbutton(options, text="Проверять изображения на целостность", variable=self.image_check_var, style="Switch.TCheckbutton").grid(row=0, column=1, sticky="w")
-        ttk.Checkbutton(options, text="Проверять видео по сигнатуре", variable=self.video_check_var, style="Switch.TCheckbutton").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        self.deep_switch = Switch(options, "Расширенная проверка файлов", self.deep_check_var, width=420)
+        self.deep_switch.grid(row=0, column=0, sticky="w", padx=(0, 12))
+        self.image_switch = Switch(options, "Проверять изображения на целостность", self.image_check_var, width=420)
+        self.image_switch.grid(row=0, column=1, sticky="w")
+        self.video_switch = Switch(options, "Проверять видео по сигнатуре", self.video_check_var, width=420)
+        self.video_switch.grid(row=1, column=0, sticky="w", pady=(10, 0))
 
         pillow_note = "Pillow найден: глубокая проверка изображений включена." if PIL_AVAILABLE else "Pillow не найден: изображения будут проверяться только по отдаче файла."
         info = tk.Label(card, text=f"Поддерживаются CSV, XLSX, XLS. {pillow_note}", bg=CARD, fg=MUTED, font=("Segoe UI", 9))
-        info.grid(row=3, column=0, columnspan=6, sticky="w", pady=(12, 0))
+        info.grid(row=3, column=0, columnspan=6, sticky="w", pady=(14, 0))
 
     def _build_actions(self, parent):
         wrap = ttk.Frame(parent, style="App.TFrame")
         wrap.grid(row=2, column=0, sticky="ew", pady=(0, 14))
         wrap.columnconfigure(1, weight=1)
 
-        left = ttk.Frame(wrap, style="App.TFrame")
+        left = tk.Frame(wrap, bg=BG)
         left.grid(row=0, column=0, sticky="w")
 
-        self.start_btn = ttk.Button(left, text="Проверить", command=self.start_check, style="Primary.TButton")
+        self.start_btn = SoftButton(left, text="Проверить", command=self.start_check, width=140, kind="primary")
         self.start_btn.grid(row=0, column=0)
-        self.stop_btn = ttk.Button(left, text="Остановить", command=self.request_stop, state="disabled", style="Secondary.TButton")
+        self.start_btn.set_text("Проверить")
+        self.stop_btn = SoftButton(left, text="Остановить", command=self.request_stop, width=140, kind="secondary")
         self.stop_btn.grid(row=0, column=1, padx=(10, 0))
-        self.save_btn = ttk.Button(left, text="Сохранить в Excel", command=self.save_results, state="disabled", style="Secondary.TButton")
+        self.stop_btn.set_text("Остановить")
+        self.stop_btn.set_state("disabled")
+        self.save_btn = SoftButton(left, text="Сохранить в Excel", command=self.save_results, width=175, kind="secondary")
         self.save_btn.grid(row=0, column=2, padx=(10, 0))
-        self.open_btn = ttk.Button(left, text="Путь к результату", command=self.open_result_folder, style="Secondary.TButton")
+        self.save_btn.set_text("Сохранить в Excel")
+        self.save_btn.set_state("disabled")
+        self.open_btn = SoftButton(left, text="Путь к результату", command=self.open_result_folder, width=165, kind="secondary")
         self.open_btn.grid(row=0, column=3, padx=(10, 0))
+        self.open_btn.set_text("Путь к результату")
 
-        right = tk.Frame(wrap, bg=BG, highlightbackground=BORDER, highlightthickness=1)
-        right.grid(row=0, column=1, sticky="e")
+        right_shell = tk.Frame(wrap, bg=BG)
+        right_shell.grid(row=0, column=1, sticky="e")
+        tk.Frame(right_shell, bg=SHADOW, height=2, width=340).pack(fill="x", padx=4, pady=(4, 0))
+        right = tk.Frame(right_shell, bg=GLASS, highlightbackground="#eceff3", highlightthickness=1)
+        right.pack(fill="both")
         self.status_var = tk.StringVar(value="Загрузите файл и выберите столбец со ссылками.")
-        tk.Label(right, textvariable=self.status_var, bg=BG, fg=MUTED, font=("Segoe UI", 10), padx=12, pady=10).pack()
+        tk.Label(right, textvariable=self.status_var, bg=GLASS, fg=MUTED, font=("Segoe UI", 10),
+                 padx=12, pady=10).pack()
 
     def _build_results(self, parent):
-        card = ttk.Frame(parent, style="Card.TFrame", padding=16)
-        card.grid(row=3, column=0, sticky="nsew")
-        card.columnconfigure(0, weight=1)
-        card.rowconfigure(4, weight=1)
+        card = self._card(parent, 3, pady=(0, 0), sticky="nsew")
+        card.master.master.rowconfigure(1, weight=1)
+        card.grid_columnconfigure(0, weight=1)
+        card.grid_rowconfigure(4, weight=1)
 
-        title_row = ttk.Frame(card, style="Card.TFrame")
+        title_row = tk.Frame(card, bg=CARD)
         title_row.grid(row=0, column=0, sticky="ew")
         title_row.columnconfigure(1, weight=1)
-        ttk.Label(title_row, text="Результаты проверки", style="Card.TLabel").grid(row=0, column=0, sticky="w")
+        tk.Label(title_row, text="Результаты проверки", bg=CARD, fg=TEXT, font=("Segoe UI", 11, "bold")).grid(row=0, column=0, sticky="w")
         self.progress_label = tk.StringVar(value="Прогресс: 0 / 0")
-        ttk.Label(title_row, textvariable=self.progress_label, style="Card.TLabel").grid(row=0, column=1, sticky="e")
+        tk.Label(title_row, textvariable=self.progress_label, bg=CARD, fg=MUTED, font=("Segoe UI", 10)).grid(row=0, column=1, sticky="e")
 
         self.progress = ttk.Progressbar(card, mode="determinate")
-        self.progress.grid(row=1, column=0, sticky="ew", pady=(10, 12))
+        self.progress.grid(row=1, column=0, sticky="ew", pady=(12, 14))
 
         stats = tk.Frame(card, bg=CARD)
         stats.grid(row=2, column=0, sticky="ew", pady=(0, 12))
@@ -274,14 +435,18 @@ class LinkCheckerApp:
         footer.columnconfigure(0, weight=1)
         foot_card = tk.Frame(footer, bg=BG)
         foot_card.grid(row=0, column=0, sticky="e")
-        label = tk.Label(foot_card, text="Created by Roman Kostrov  •  rkostrov@yandex.ru", font=("Segoe UI", 9), fg=MUTED, bg=BG, cursor="hand2")
+        label = tk.Label(foot_card, text="Created by Roman Kostrov  •  rkostrov@yandex.ru",
+                         font=("Segoe UI", 9), fg=MUTED, bg=BG, cursor="hand2")
         label.pack(anchor="e")
         label.bind("<Button-1>", lambda event: webbrowser.open("mailto:rkostrov@yandex.ru"))
 
     def _stat_chip(self, parent, variable, column, fg=TEXT):
-        chip = tk.Frame(parent, bg="#f9fafb", highlightbackground=BORDER, highlightthickness=1)
-        chip.grid(row=0, column=column, sticky="ew", padx=(0 if column == 0 else 8, 0))
-        tk.Label(chip, textvariable=variable, bg="#f9fafb", fg=fg, font=("Segoe UI", 10, "bold"), padx=12, pady=8).pack(fill="x")
+        wrap = tk.Frame(parent, bg=CARD)
+        wrap.grid(row=0, column=column, sticky="ew", padx=(0 if column == 0 else 8, 0))
+        tk.Frame(wrap, bg=SHADOW, height=2).pack(fill="x", padx=4, pady=(4, 0))
+        chip = tk.Frame(wrap, bg="#f9fafb", highlightbackground=BORDER, highlightthickness=1)
+        chip.pack(fill="x")
+        tk.Label(chip, textvariable=variable, bg="#f9fafb", fg=fg, font=("Segoe UI", 10, "bold"), padx=12, pady=9).pack(fill="x")
 
     def choose_file(self):
         path = filedialog.askopenfilename(
@@ -301,7 +466,7 @@ class LinkCheckerApp:
                 self.column_var.set(guessed or cols[0])
             self.status_var.set(f"Загружено строк: {len(self.df)}")
             self.results_df = None
-            self.save_btn.config(state="disabled")
+            self.save_btn.set_state("disabled")
             self._clear_tree()
         except Exception as e:
             messagebox.showerror("Ошибка загрузки", f"Не удалось прочитать файл.\n\n{e}")
@@ -352,9 +517,10 @@ class LinkCheckerApp:
 
         self.stop_requested = False
         self.results_df = None
-        self.save_btn.config(state="disabled")
-        self.start_btn.config(state="disabled")
-        self.stop_btn.config(state="normal")
+        self.save_btn.set_state("disabled")
+        self.start_btn.set_state("disabled")
+        self.stop_btn.set_state("normal")
+        self.choose_btn.set_state("disabled")
         self._clear_tree()
         self.progress["maximum"] = len(rows)
         self.progress["value"] = 0
@@ -492,10 +658,11 @@ class LinkCheckerApp:
                         f"{row.elapsed_sec:.2f}",
                     ))
                 elif item["type"] == "done":
-                    self.start_btn.config(state="normal")
-                    self.stop_btn.config(state="disabled")
+                    self.start_btn.set_state("normal")
+                    self.stop_btn.set_state("disabled")
+                    self.choose_btn.set_state("normal")
                     if self.results_df is not None and len(self.results_df) > 0:
-                        self.save_btn.config(state="normal")
+                        self.save_btn.set_state("normal")
                         self.status_var.set("Проверка завершена. Можно сохранять в Excel.")
                     else:
                         self.status_var.set("Проверка завершена, но результатов для сохранения нет.")
@@ -508,9 +675,10 @@ class LinkCheckerApp:
                     self.valid_var.set(f"Файлы OK: {item['valid']}")
                     self.time_var.set(f"Время: {item['elapsed']:.1f} сек")
                 elif item["type"] == "fatal_error":
-                    self.start_btn.config(state="normal")
-                    self.stop_btn.config(state="disabled")
-                    self.save_btn.config(state="disabled")
+                    self.start_btn.set_state("normal")
+                    self.stop_btn.set_state("disabled")
+                    self.save_btn.set_state("disabled")
+                    self.choose_btn.set_state("normal")
                     self.progress["value"] = item["completed"]
                     self.progress_label.set(f"Прогресс: {item['completed']} / {item['total']}")
                     self.ok_var.set(f"OK: {item['ok']}")
