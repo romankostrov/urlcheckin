@@ -277,7 +277,7 @@ class LinkCheckerApp:
         )
         subtitle.grid(row=1, column=1, sticky="nw")
 
-        chip = tk.Label(top, text="Apple-like desktop utility", bg="#f5f7fb", fg=TEXT,
+        chip = tk.Label(top, text="for personal use only", bg="#f5f7fb", fg=TEXT,
                         font=("Segoe UI", 9, "bold"), padx=12, pady=7)
         chip.grid(row=0, column=2, sticky="ne", padx=(18, 0), pady=(4, 0))
 
