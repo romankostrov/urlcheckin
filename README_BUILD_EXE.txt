@@ -19,3 +19,5 @@
   py -m pip install -r requirements.txt
   py -m pip install pyinstaller
   py -m PyInstaller --noconfirm --clean --onefile --windowed --name LinkCheckerDesktop link_checker_desktop.py
+  py -m PyInstaller --onefile --noconsole --name LinkCheckerDesktop link_checker_desktop_apple.py
+

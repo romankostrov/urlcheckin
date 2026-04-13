@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['link_checker_desktop.py'],
+    ['link_checker_desktop_apple.py'],
     pathex=[],
     binaries=[],
     datas=[],
